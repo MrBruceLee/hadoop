@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.yarn.api.records.impl.pb;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.protocolrecords.ResourceTypes;
@@ -36,6 +38,8 @@ import java.util.*;
 @Private
 @Unstable
 public class ResourcePBImpl extends Resource {
+
+  private static final Log LOG = LogFactory.getLog(ResourcePBImpl.class);
 
   ResourceProto proto = ResourceProto.getDefaultInstance();
   ResourceProto.Builder builder = null;
@@ -71,7 +75,7 @@ public class ResourcePBImpl extends Resource {
   @Override
   public int getMemory() {
     // memory should always be present
-    initResourcesMap();
+    initResources();
     ResourceInformation ri =
         this.getResourceInformation(ResourceInformation.MEMORY_MB.getName());
     if (ri.getValue() > Integer.MAX_VALUE) {
@@ -79,8 +83,9 @@ public class ResourcePBImpl extends Resource {
           "Illegal value for memory - " + ri.getValue()
               + ". Value must be less than " + Integer.MAX_VALUE);
     }
-    return (int) UnitsConversionUtil.convert(ri.getUnits(), "Mi", ri.getValue())
-        .longValue();
+    return (int) UnitsConversionUtil
+        .convert(ri.getUnits(), ResourceInformation.MEMORY_MB.getUnits(),
+            ri.getValue()).longValue();
   }
 
   @Override
@@ -88,13 +93,12 @@ public class ResourcePBImpl extends Resource {
     setResourceInformation(ResourceInformation.MEMORY_MB.getName(),
         ResourceInformation.newInstance(ResourceInformation.MEMORY_MB.getName(),
             ResourceInformation.MEMORY_MB.getUnits(), (long) memory));
-
   }
 
   @Override
   public int getVirtualCores() {
     // vcores should always be present
-    initResourcesMap();
+    initResources();
     Long vcores = this.getResourceValue(ResourceInformation.VCORES.getName());
     if (vcores > Integer.MAX_VALUE) {
       throw new YarnRuntimeException(
@@ -106,14 +110,9 @@ public class ResourcePBImpl extends Resource {
 
   @Override
   public void setVirtualCores(int vCores) {
-    try {
-      setResourceValue(ResourceInformation.VCORES.getName(),
-          Long.valueOf(vCores));
-    } catch (ResourceNotFoundException re) {
-      this.setResourceInformation(ResourceInformation.VCORES.getName(),
-          ResourceInformation.newInstance(ResourceInformation.VCORES.getName(),
-              (long) vCores));
-    }
+    setResourceInformation(ResourceInformation.VCORES.getName(),
+        ResourceInformation.newInstance(ResourceInformation.VCORES.getName(),
+            ResourceInformation.VCORES.getUnits(), (long) vCores));
   }
 
   private void initResources() {
@@ -130,14 +129,16 @@ public class ResourcePBImpl extends Resource {
       Long value = entry.hasValue() ? entry.getValue() : 0L;
       ResourceInformation ri =
           ResourceInformation.newInstance(entry.getKey(), units, value, type);
-      resources.put(ri.getName(), ri);
+      if (resources.containsKey(ri.getName())) {
+        resources.get(ri.getName()).setResourceType(ri.getResourceType());
+        resources.get(ri.getName()).setUnits(ri.getUnits());
+        resources.get(ri.getName()).setValue(value);
+      } else {
+        LOG.warn("Got unknown resource type: " + ri.getName() + "; skipping");
+      }
     }
-    if(this.getMemory() != p.getMemory()) {
-      setMemory(p.getMemory());
-    }
-    if(this.getVirtualCores() != p.getVirtualCores()) {
-      setVirtualCores(p.getVirtualCores());
-    }
+    this.setMemory(p.getMemory());
+    this.setVirtualCores(p.getVirtualCores());
   }
 
   @Override
@@ -151,7 +152,7 @@ public class ResourcePBImpl extends Resource {
     if (!resource.equals(resourceInformation.getName())) {
       resourceInformation.setName(resource);
     }
-    initResourcesMap();
+    initResources();
     resources.put(resource, resourceInformation);
   }
 
@@ -159,6 +160,7 @@ public class ResourcePBImpl extends Resource {
   public void setResourceValue(String resource, Long value)
       throws ResourceNotFoundException {
     maybeInitBuilder();
+    initResources();
     if (resource == null) {
       throw new IllegalArgumentException("resource type object cannot be null");
     }
@@ -166,9 +168,7 @@ public class ResourcePBImpl extends Resource {
       throw new ResourceNotFoundException(
           "Resource " + resource + " not found");
     }
-    ResourceInformation ri = resources.get(resource);
-    ri.setValue(value);
-    resources.put(resource, ri);
+    resources.get(resource).setValue(value);
   }
 
   @Override
@@ -213,8 +213,10 @@ public class ResourcePBImpl extends Resource {
   synchronized private void mergeLocalToBuilder() {
     builder.clearResourceValueMap();
     if (resources != null && !resources.isEmpty()) {
-      for (Map.Entry<String, ResourceInformation> entry : resources.entrySet()) {
-        ResourceInformationProto.Builder e = ResourceInformationProto.newBuilder();
+      for (Map.Entry<String, ResourceInformation> entry :
+          resources.entrySet()) {
+        ResourceInformationProto.Builder e =
+            ResourceInformationProto.newBuilder();
         e.setKey(entry.getKey());
         e.setUnits(entry.getValue().getUnits());
         e.setType(
